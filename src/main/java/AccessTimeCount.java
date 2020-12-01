@@ -1,5 +1,8 @@
 import org.apache.commons.io.FilenameUtils;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.Text;
@@ -52,15 +55,15 @@ public class AccessTimeCount {
      * Make line number embedded trace file.
      */
     private static void embeddingLineNum(String inputPath, String outputPath) throws IOException {
-        File outputFile = new File(outputPath);
-        if (outputFile.exists()) {
+        FileSystem fs = FileSystem.get(new Configuration());
+        if (fs.exists(new Path(outputPath))) {
             return;
-        } else if (!outputFile.createNewFile()) {
-            throw new IOException("can't create line number embedding input file");
         }
         try (
-                BufferedReader reader = new BufferedReader(new FileReader(inputPath));
-                FileWriter writer = new FileWriter(outputFile);
+                FSDataInputStream inputStream = fs.open(new Path(inputPath));
+                BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
+                FSDataOutputStream outputStream = fs.create(new Path(outputPath));
+                BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(outputStream));
         ) {
             String key = reader.readLine();
             int lineNum = 0;
