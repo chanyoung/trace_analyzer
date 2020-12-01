@@ -1,5 +1,7 @@
 import com.google.common.collect.Range;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.Text;
@@ -55,8 +57,11 @@ public class CalculateIrr {
         protected void setup(Context context) throws IOException, InterruptedException {
             // Load trace data.
             String tracePath = context.getConfiguration().get("tracepath");
+
+            FileSystem fs = FileSystem.get(context.getConfiguration());
             try (
-                    BufferedReader reader = new BufferedReader(new FileReader(tracePath));
+                    FSDataInputStream inputStream = fs.open(new Path(tracePath));
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
             ) {
                 String key = reader.readLine();
                 while (key != null) {
