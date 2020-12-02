@@ -1,4 +1,6 @@
 import com.google.common.collect.Range;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileSystem;
@@ -39,7 +41,10 @@ public class CalculateIrr {
             return range.hasLowerBound() ? range.lowerEndpoint() : range.upperEndpoint();
         });
         NavigableSet<Range<Integer>> ranges = new TreeSet<>(comparator);
-        List<String> accessTimes = new ArrayList<>();
+        List<Integer> accessTimes = new ArrayList<>();
+        List<Range<Integer>> executionOrder;
+
+        static final Log log = LogFactory.getLog(IrrMapper.class);
 
         @Override
         public void map(Object key, Text value, Context context) throws IOException, InterruptedException {
@@ -65,30 +70,36 @@ public class CalculateIrr {
             ) {
                 String key = reader.readLine();
                 while (key != null) {
-                    accessTimes.add(key);
+                    accessTimes.add(Integer.valueOf(key));
                     key = reader.readLine();
                 }
             }
         }
 
+        private void makeExecutionOrder() {
+            Network<Range<Integer>, Integer> dependencyGraph = getDependencies(ranges);
+            log.info("generate graph done");
+            executionOrder = topologicalSort(dependencyGraph);
+            log.info("topological sort done, jobs: " + executionOrder.size());
+            ranges.clear();
+        }
+
         @Override
         protected void cleanup(Context context) throws IOException, InterruptedException {
-            Set<String> uniqueKeys = new HashSet<>();
+            Set<Integer> uniqueKeys = new HashSet<>();
             Range<Integer> prevRange = Range.closed(0, accessTimes.size());
 
-            Network<Range<Integer>, Integer> dependencyGraph = getDependencies(ranges);
-            System.out.println("generate graph done.");
-
-            List<Range<Integer>> executionOrder = topologicalSort(dependencyGraph);
-            System.out.printf("topological sort done, jobs: %d\n", executionOrder.size());
+            makeExecutionOrder();
+            int executionSize = executionOrder.size();
 
             int executed = 0;
             int subrangeProcessed = 0;
-            for (Range<Integer> range : executionOrder) {
+            while (!executionOrder.isEmpty()) {
+                Range<Integer> range = executionOrder.remove(0);
                 checkState(accessTimes.get(range.lowerEndpoint()).equals(accessTimes.get(range.upperEndpoint())));
 
                 if (range.encloses(prevRange)) {
-                    System.out.println(range + " encloses " + prevRange);
+                    log.info(range + " encloses " + prevRange);
                     subrangeProcessed++;
                     for (int i = range.lowerEndpoint(); i < prevRange.lowerEndpoint(); i++) {
                         uniqueKeys.add(accessTimes.get(i));
@@ -109,9 +120,8 @@ public class CalculateIrr {
 
                 executed++;
                 if (executed % 100 == 0) {
-                    System.out.printf("progress: %.2f, subrange processed: %.2f\n",
-                            (double) executed / executionOrder.size() * 100,
-                            (double) subrangeProcessed / executed * 100);
+                    log.info("progress: " + 100 * executed / executionSize + "%"
+                            + ", subrange processed: " + 100 * subrangeProcessed / executed + "%");
                 }
             }
         }
