@@ -41,26 +41,34 @@ public class CalculateIrr {
             return range.hasLowerBound() ? range.lowerEndpoint() : range.upperEndpoint();
         });
         NavigableSet<Range<Integer>> ranges = new TreeSet<>(comparator);
-        List<Integer> accessTimes = new ArrayList<>();
         List<Range<Integer>> executionOrder;
+
+        List<Integer> accessTimes = new ArrayList<>();
+        int minAccessTime = Integer.MAX_VALUE;
+        int maxAccessTime = Integer.MIN_VALUE;
 
         static final Log log = LogFactory.getLog(IrrMapper.class);
 
         @Override
         public void map(Object key, Text value, Context context) throws IOException, InterruptedException {
             StringTokenizer tokenizer = new StringTokenizer(value.toString());
-            if (tokenizer.countTokens() != 3) {
+            if (tokenizer.countTokens() != 2) {
                 throw new IllegalStateException("invalid mapper input rows: " + value.toString());
             }
-            tokenizer.nextToken(); // Drop hash key.
             int lower = Integer.parseInt(tokenizer.nextToken());
             int upper = Integer.parseInt(tokenizer.nextToken());
             ranges.add(Range.closed(lower, upper));
+
+            if (lower < minAccessTime) {
+                minAccessTime = lower;
+            }
+            if (upper > maxAccessTime) {
+                maxAccessTime = upper;
+            }
         }
 
-        @Override
-        protected void setup(Context context) throws IOException, InterruptedException {
-            // Load trace data.
+        private void loadTraceData(Context context) throws IOException {
+            checkState(minAccessTime < maxAccessTime);
             String tracePath = context.getConfiguration().get("tracepath");
 
             FileSystem fs = FileSystem.get(context.getConfiguration());
@@ -68,12 +76,16 @@ public class CalculateIrr {
                     FSDataInputStream inputStream = fs.open(new Path(tracePath));
                     BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
             ) {
-                String key = reader.readLine();
-                while (key != null) {
-                    accessTimes.add(Integer.valueOf(key));
-                    key = reader.readLine();
+                for (int i = 0; i <= maxAccessTime; i++) {
+                    String key = reader.readLine();
+                    if (i < minAccessTime) {
+                        accessTimes.add(null);
+                    } else {
+                        accessTimes.add(Integer.valueOf(key));
+                    }
                 }
             }
+            log.info("load trace data from " + minAccessTime + " to " + maxAccessTime + " done.");
         }
 
         private void makeExecutionOrder() {
@@ -86,8 +98,10 @@ public class CalculateIrr {
 
         @Override
         protected void cleanup(Context context) throws IOException, InterruptedException {
-            Set<Integer> uniqueKeys = new HashSet<>();
-            Range<Integer> prevRange = Range.closed(0, accessTimes.size());
+            loadTraceData(context);
+
+            Map<Integer, Integer> uniqueKeys = new HashMap<>();
+            Range<Integer> prevRange = null;
 
             makeExecutionOrder();
             int executionSize = executionOrder.size();
@@ -98,21 +112,76 @@ public class CalculateIrr {
                 Range<Integer> range = executionOrder.remove(0);
                 checkState(accessTimes.get(range.lowerEndpoint()).equals(accessTimes.get(range.upperEndpoint())));
 
-                if (range.encloses(prevRange)) {
+                if (prevRange == null) {
+                    uniqueKeys = new HashMap<>();
+                    for (int i = range.lowerEndpoint(); i <= range.upperEndpoint(); i++) {
+                        Integer key = Objects.requireNonNull(accessTimes.get(i));
+                        uniqueKeys.merge(key, 1, Integer::sum);
+                    }
+                } else if (range.encloses(prevRange)) {
                     log.info(range + " encloses " + prevRange);
                     subrangeProcessed++;
                     for (int i = range.lowerEndpoint(); i < prevRange.lowerEndpoint(); i++) {
-                        uniqueKeys.add(accessTimes.get(i));
+                        Integer key = Objects.requireNonNull(accessTimes.get(i));
+                        uniqueKeys.merge(key, 1, Integer::sum);
                     }
-                    for (int i = prevRange.upperEndpoint(); i < range.upperEndpoint(); i++) {
-                        uniqueKeys.add(accessTimes.get(i));
+                    for (int i = prevRange.upperEndpoint(); i <= range.upperEndpoint(); i++) {
+                        Integer key = Objects.requireNonNull(accessTimes.get(i));
+                        uniqueKeys.merge(key, 1, Integer::sum);
                     }
                 } else {
-                    uniqueKeys = new HashSet<>();
-                    for (int i = range.lowerEndpoint(); i < range.upperEndpoint(); i++) {
-                        uniqueKeys.add(accessTimes.get(i));
+                    if (prevRange.isConnected(range)) {
+                        Range<Integer> intersection = prevRange.intersection(range);
+                        int intersectionLength = intersection.upperEndpoint() - intersection.lowerEndpoint();
+                        int prevRangeLength = prevRange.upperEndpoint() - prevRange.lowerEndpoint();
+                        if (intersectionLength < prevRangeLength * 0.7) {
+                            uniqueKeys = new HashMap<>();
+                            for (int i = range.lowerEndpoint(); i <= range.upperEndpoint(); i++) {
+                                Integer key = Objects.requireNonNull(accessTimes.get(i));
+                                uniqueKeys.merge(key, 1, Integer::sum);
+                            }
+                        } else {
+                            if (prevRange.lowerEndpoint() < range.lowerEndpoint()) {
+                                for (int i = prevRange.lowerEndpoint(); i < range.lowerEndpoint(); i++) {
+                                    Integer key = Objects.requireNonNull(accessTimes.get(i));
+                                    Integer count = uniqueKeys.get(key);
+                                    if (count > 1) {
+                                        uniqueKeys.put(key, count - 1);
+                                    } else {
+                                        uniqueKeys.remove(key);
+                                    }
+                                }
+                            } else {
+                                for (int i = range.lowerEndpoint(); i < prevRange.lowerEndpoint(); i++) {
+                                    Integer key = Objects.requireNonNull(accessTimes.get(i));
+                                    uniqueKeys.merge(key, 1, Integer::sum);
+                                }
+                            }
+                            if (prevRange.upperEndpoint() > range.upperEndpoint()) {
+                                for (int i = range.upperEndpoint() + 1; i <= prevRange.upperEndpoint(); i++) {
+                                    Integer key = Objects.requireNonNull(accessTimes.get(i));
+                                    Integer count = uniqueKeys.get(key);
+                                    if (count > 1) {
+                                        uniqueKeys.put(key, count - 1);
+                                    } else {
+                                        uniqueKeys.remove(key);
+                                    }
+                                }
+                            } else {
+                                for (int i = prevRange.upperEndpoint() + 1; i <= range.upperEndpoint(); i++) {
+                                    Integer key = Objects.requireNonNull(accessTimes.get(i));
+                                    uniqueKeys.merge(key, 1, Integer::sum);
+                                }
+                            }
+                        }
+                    } else {
+                        uniqueKeys = new HashMap<>();
+                        for (int i = range.lowerEndpoint(); i <= range.upperEndpoint(); i++) {
+                            Integer key = Objects.requireNonNull(accessTimes.get(i));
+                            uniqueKeys.merge(key, 1, Integer::sum);
+                        }
                     }
-                }
+               }
                 prevRange = range;
 
                 int irr = uniqueKeys.size() - 1;
